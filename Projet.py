@@ -1,123 +1,102 @@
+# Upload images
+from google.colab import files
+uploaded = files.upload()
+
+# Check uploaded filenames
+print("Uploaded files:", uploaded.keys())
+
+# Import libraries
 import cv2
-import tensorflow as tf
 import numpy as np
-import os
 import matplotlib.pyplot as plt
-import random
 
-# Load sample image
-img_array = cv2.imread("Training/0/Training_314.jpg")
+# File paths (update these if the filenames are different)
+img1_path = 'form.jpg'
+img2_path = 'scanned-form.jpg'
 
-# Define data path
-Datadirectory = "Training/"
-Classes = ["0", "1", "2", "3", "4", "5", "6"]
+# Read images
+img1 = cv2.imread(img1_path, cv2.IMREAD_COLOR)
+img2 = cv2.imread(img2_path, cv2.IMREAD_COLOR)
 
-# Show one image from each category (optional preview)
-for category in Classes:
-    path = os.path.join(Datadirectory, category)
-    for img in os.listdir(path):
-        img_array = cv2.imread(os.path.join(path, img))
-        plt.imshow(cv2.cvtColor(img_array, cv2.COLOR_BGR2RGB))
-        plt.title(f"Category {category}")
-        plt.show()
-        break
-    break
+# Check for loading errors
+if img1 is None:
+    raise ValueError(f"Could not load image: {img1_path}")
+if img2 is None:
+    raise ValueError(f"Could not load image: {img2_path}")
 
-# Resize for uniformity
-img_size = 224
-new_array = cv2.resize(img_array, (img_size, img_size))
-plt.imshow(cv2.cvtColor(new_array, cv2.COLOR_BGR2RGB))
+# Convert to RGB for visualization
+img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)
+img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
+
+# Display original images
+plt.figure(figsize=[20, 10])
+plt.subplot(121)
+plt.axis('off')
+plt.imshow(img1)
+plt.title("Original Form")
+plt.subplot(122)
+plt.axis('off')
+plt.imshow(img2)
+plt.title("Scanned Form")
 plt.show()
 
-# Create training data
-training_data = []
-def create_training_data():
-    for category in Classes:
-        path = os.path.join(Datadirectory, category)
-        class_num = Classes.index(category)
-        for img in os.listdir(path):
-            try:
-                img_array = cv2.imread(os.path.join(path, img))
-                new_array = cv2.resize(img_array, (img_size, img_size))
-                training_data.append([new_array, class_num])
-            except Exception as e:
-                pass
+# Convert to grayscale for feature matching
+img1_gray = cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY)
+img2_gray = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
 
-create_training_data()
-print("Total training samples:", len(training_data))
+# ORB feature detection and description
+orb = cv2.ORB_create(500)
+keypoints1, descriptors1 = orb.detectAndCompute(img1_gray, None)
+keypoints2, descriptors2 = orb.detectAndCompute(img2_gray, None)
 
-# Shuffle and split features and labels
-random.shuffle(training_data)
-X = []
-y = []
-for features, label in training_data:
-    X.append(features)
-    y.append(label)
+# Draw keypoints for visualization
+img1_kp = cv2.drawKeypoints(img1, keypoints1, None, color=(255, 0, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+img2_kp = cv2.drawKeypoints(img2, keypoints2, None, color=(255, 0, 0), flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
 
-X = np.array(X).reshape(-1, img_size, img_size, 3)
-X = X / 255.0
-Y = np.array(y)
+# Match features
+matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_HAMMING)
+matches = matcher.match(descriptors1, descriptors2)
+matches = sorted(matches, key=lambda x: x.distance)
 
-# Load MobileNetV2 as base model
-base_model = tf.keras.applications.MobileNetV2(include_top=False, input_shape=(224,224,3), pooling='avg')
-base_output = base_model.output
+# Keep only good matches
+numGoodMatches = int(len(matches) * 0.1)
+matches = matches[:numGoodMatches]
 
-# Add custom layers
-final_output = tf.keras.layers.Dense(128, activation='relu')(base_output)
-final_output = tf.keras.layers.Dense(64, activation='relu')(final_output)
-final_output = tf.keras.layers.Dense(7, activation='softmax')(final_output)
+# Draw good matches
+im_matches = cv2.drawMatches(img1, keypoints1, img2, keypoints2, matches, None)
 
-new_model = tf.keras.Model(inputs=base_model.input, outputs=final_output)
-new_model.summary()
+# Show matches
+plt.figure(figsize=[20, 10])
+plt.imshow(im_matches)
+plt.axis('off')
+plt.title("Top ORB Matches")
+plt.show()
 
-# Compile model
-new_model.compile(loss="sparse_categorical_crossentropy", optimizer="adam", metrics=["accuracy"])
+# Extract matched points
+points1 = np.zeros((len(matches), 2), dtype=np.float32)
+points2 = np.zeros((len(matches), 2), dtype=np.float32)
 
-# Train model
-new_model.fit(X, Y, epochs=25)
+for i, match in enumerate(matches):
+    points1[i, :] = keypoints1[match.queryIdx].pt
+    points2[i, :] = keypoints2[match.trainIdx].pt
 
-# Save model
-new_model.save('final_model_95p07.h5')
-new_model = tf.keras.models.load_model('final_model_95p07.h5')
+# Compute homography
+h, mask = cv2.findHomography(points2, points1, cv2.RANSAC)
 
+if h is not None:
+    height, width, channels = img1.shape
+    img2_reg = cv2.warpPerspective(img2, h, (width, height))
 
-# Load the face cascade
-faceCascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Cannot open camera")
-    exit()
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = faceCascade.detectMultiScale(gray, 1.1, 4)
-
-    for (x, y, w, h) in faces:
-        roi_color = frame[y:y+h, x:x+w]
-        backtorgb = cv2.cvtColor(roi_color, cv2.COLOR_BGR2RGB)
-        final_image = cv2.resize(backtorgb, (224, 224))
-        final_image = np.expand_dims(final_image, axis=0) / 255.0
-
-        Predictions = new_model.predict(final_image)
-        predicted_class = np.argmax(Predictions)
-        emotions = ["Angry", "Disgust", "Fear", "Happy", "Neutral", "Sad", "Surprise"]
-        Status = emotions[predicted_class]
-
-        # Draw the rectangle and text
-        x1, y1, box_w, box_h = 0, 0, 175, 75
-        cv2.rectangle(frame, (x1, y1), (x1 + box_w, y1 + box_h), (0, 0, 0), -1)
-        cv2.putText(frame, Status, (x1 + 10, y1 + 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 2)
-        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 2)
-
-    cv2.imshow('Facial Emotion Recognition', frame)
-    
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
+    # Show aligned result
+    plt.figure(figsize=[20, 10])
+    plt.subplot(121)
+    plt.imshow(img1)
+    plt.axis("off")
+    plt.title("Original Form")
+    plt.subplot(122)
+    plt.imshow(img2_reg)
+    plt.axis("off")
+    plt.title("Registered Scanned Form")
+    plt.show()
+else:
+    print("Homography could not be computed.")
